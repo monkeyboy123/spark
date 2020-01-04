@@ -141,6 +141,7 @@ class SessionResourceLoader(session: SparkSession) extends FunctionResourceLoade
     resource.resourceType match {
       case JarResource => addJar(resource.uri)
       case FileResource => session.sparkContext.addFile(resource.uri)
+      case TestResource => Option(null)
       case ArchiveResource =>
         throw new AnalysisException(
           "Archive is not allowed to be loaded. If YARN mode is used, " +

@@ -1118,15 +1118,37 @@ class SessionCatalog(
    * Constructs a [[FunctionBuilder]] based on the provided class that represents a function.
    */
   private def makeFunctionBuilder(name: String, functionClassName: String): FunctionBuilder = {
-    val clazz = Utils.classForName(functionClassName)
-    (input: Seq[Expression]) => makeFunctionExpression(name, clazz, input)
+    if (functionClassName == "test") {
+      (input: Seq[Expression]) => makeFunctionExpression(name, functionClassName, input)
+    } else {
+      val clazz = Utils.classForName(functionClassName)
+      (input: Seq[Expression]) => makeFunctionExpression(name, clazz, input)
+    }
   }
+
+
+  /**
+   * just for test create function extends
+   * @param name
+   * @param clazz
+   * @param input
+   * @return
+   */
+  protected def makeFunctionExpression(
+                                        name: String,
+                                        clazz: String,
+                                        input: Seq[Expression]): Expression = {
+    val udfExpr: Option[Expression] = None
+    udfExpr.get
+  }
+
 
   /**
    * Constructs a [[Expression]] based on the provided class that represents a function.
    *
    * This performs reflection to decide what type of [[Expression]] to return in the builder.
    */
+
   protected def makeFunctionExpression(
       name: String,
       clazz: Class[_],
@@ -1176,7 +1198,9 @@ class SessionCatalog(
     val builder =
       functionBuilder.getOrElse {
         val className = funcDefinition.className
-        if (!Utils.classIsLoadable(className)) {
+        val isTest = funcDefinition.resources(0)
+          .resourceType.resourceType == TestResource.resourceType
+        if (!isTest && !Utils.classIsLoadable(className) ) {
           throw new AnalysisException(s"Can not load class '$className' when registering " +
             s"the function '$func', please make sure it is on the classpath")
         }

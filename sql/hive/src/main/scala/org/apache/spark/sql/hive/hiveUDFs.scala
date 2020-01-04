@@ -21,6 +21,7 @@ import java.nio.ByteBuffer
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable.ArrayBuffer
+import scala.math.Numeric.Implicits.infixNumericOps
 
 import org.apache.hadoop.hive.ql.exec._
 import org.apache.hadoop.hive.ql.udf.{UDFType => HiveUDFType}
@@ -30,6 +31,7 @@ import org.apache.hadoop.hive.ql.udf.generic.GenericUDF._
 import org.apache.hadoop.hive.ql.udf.generic.GenericUDFUtils.ConversionHelper
 import org.apache.hadoop.hive.serde2.objectinspector.{ConstantObjectInspector, ObjectInspector, ObjectInspectorFactory}
 import org.apache.hadoop.hive.serde2.objectinspector.ObjectInspectorFactory.ObjectInspectorOptions
+import org.apache.hadoop.io.Text
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.InternalRow
@@ -39,6 +41,13 @@ import org.apache.spark.sql.catalyst.expressions.codegen.CodegenFallback
 import org.apache.spark.sql.hive.HiveShim._
 import org.apache.spark.sql.types._
 
+/**
+ * create TEMPORARY function gogo as 'test' using test 'uri'  type 'test'
+ * select gogo("ss","s")
+ * @param name
+ * @param funcWrapper
+ * @param children
+ */
 
 private[hive] case class HiveSimpleUDF(
     name: String, funcWrapper: HiveFunctionWrapper, children: Seq[Expression])
@@ -107,6 +116,71 @@ private[hive] case class HiveSimpleUDF(
 
   override def sql: String = s"$name(${children.map(_.sql).mkString(", ")})"
 }
+
+private[hive] case class HiveTestUDF(name: String,
+                                     func: String,
+                                     children: Seq[Expression])
+  extends Expression
+    with HiveInspectors
+    with CodegenFallback
+    with Logging
+    with UserDefinedExpression {
+
+  override lazy val deterministic: Boolean = children.forall(_.deterministic)
+
+  override def nullable: Boolean = true
+
+//  @transient
+//  lazy val function = funcWrapper.createFunction[UDF]()
+
+  @transient
+  private lazy val method =
+    classOf[String].getDeclaredMethod("startsWith", classOf[String])
+//    function.getResolver.getEvalMethod(children.map(_.dataType.toTypeInfo).asJava)
+
+  @transient
+  private lazy val arguments = children.map(toInspector).toArray
+
+
+  override def foldable: Boolean = children.forall(_.foldable)
+
+  // Create parameter converters
+  @transient
+  private lazy val conversionHelper = new ConversionHelper(method, arguments)
+
+  override lazy val dataType = javaTypeToDataType(method.getGenericReturnType)
+
+  @transient
+  private lazy val wrappers = children.map(x => wrapperFor(toInspector(x), x.dataType)).toArray
+
+  @transient
+  lazy val unwrapper = unwrapperFor(ObjectInspectorFactory.getReflectionObjectInspector(
+    method.getGenericReturnType, ObjectInspectorOptions.JAVA))
+
+  @transient
+  private lazy val cached: Array[AnyRef] = new Array[AnyRef](children.length)
+
+  @transient
+  private lazy val inputDataTypes: Array[DataType] = children.map(_.dataType).toArray
+
+  // TODO: Finish input output types.
+  override def eval(input: InternalRow): Any = {
+    val inputs = wrap(children.map(_.eval(input)), wrappers, cached, inputDataTypes)
+//    val inputsObject = conversionHelper.convertIfNecessary(inputs : _*)
+    val ret = method.invoke(inputs(0).asInstanceOf[Text].toString, inputs(1).asInstanceOf[Text].toString)
+//    val ret = method.invoke(inputsObject(0), inputsObject(1))
+    unwrapper(ret)
+  }
+
+  override def toString: String = {
+    s"$nodeName#${func}(${children.mkString(",")})"
+  }
+
+  override def prettyName: String = name
+
+  override def sql: String = s"$name(${children.map(_.sql).mkString(", ")})"
+}
+
 
 // Adapter from Catalyst ExpressionResult to Hive DeferredObject
 private[hive] class DeferredObjectAdapter(oi: ObjectInspector, dataType: DataType)

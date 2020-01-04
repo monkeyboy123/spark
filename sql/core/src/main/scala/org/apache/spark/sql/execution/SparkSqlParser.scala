@@ -725,13 +725,13 @@ class SparkSqlAstBuilder(conf: SQLConf) extends AstBuilder(conf) {
     val resources = ctx.resource.asScala.map { resource =>
       val resourceType = resource.identifier.getText.toLowerCase(Locale.ROOT)
       resourceType match {
-        case "jar" | "file" | "archive" =>
+        case "jar" | "file" | "archive" | "test" =>
           FunctionResource(FunctionResourceType.fromString(resourceType), string(resource.STRING))
         case other =>
           operationNotAllowed(s"CREATE FUNCTION with resource type '$resourceType'", ctx)
       }
     }
-
+   val fuctionType = ctx.functionType().getText
     // Extract database, name & alias.
     val functionIdentifier = visitFunctionName(ctx.qualifiedName)
     CreateFunctionCommand(
@@ -741,7 +741,8 @@ class SparkSqlAstBuilder(conf: SQLConf) extends AstBuilder(conf) {
       resources,
       ctx.TEMPORARY != null,
       ctx.EXISTS != null,
-      ctx.REPLACE != null)
+      ctx.REPLACE != null,
+      fuctionType)
   }
 
   /**

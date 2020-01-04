@@ -56,6 +56,16 @@ private[sql] class HiveSessionCatalog(
       parser,
       functionResourceLoader) {
 
+  override def makeFunctionExpression(name: String,
+                                       clazz: String,
+                                       input: scala.Seq[Expression]): Expression = {
+    var udfExpr: Option[Expression] = None
+    udfExpr = Some(HiveTestUDF(name, clazz, input))
+    udfExpr.getOrElse {
+      throw new AnalysisException(s"No handler for String '${clazz}'")
+    }
+  }
+
   /**
    * Constructs a [[Expression]] based on the provided class that represents a function.
    *

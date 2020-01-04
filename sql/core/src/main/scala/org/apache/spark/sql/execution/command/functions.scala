@@ -52,7 +52,8 @@ case class CreateFunctionCommand(
     resources: Seq[FunctionResource],
     isTemp: Boolean,
     ignoreIfExists: Boolean,
-    replace: Boolean)
+    replace: Boolean,
+    functionType: String = "")
   extends RunnableCommand {
 
   if (ignoreIfExists && replace) {

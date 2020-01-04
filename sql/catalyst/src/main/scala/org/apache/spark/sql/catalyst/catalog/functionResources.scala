@@ -28,6 +28,8 @@ object JarResource extends FunctionResourceType("jar")
 
 object FileResource extends FunctionResourceType("file")
 
+object TestResource extends FunctionResourceType("test")
+
 // We do not allow users to specify an archive because it is YARN specific.
 // When loading resources, we will throw an exception and ask users to
 // use --archive with spark submit.
@@ -39,6 +41,7 @@ object FunctionResourceType {
       case "jar" => JarResource
       case "file" => FileResource
       case "archive" => ArchiveResource
+      case "test" => TestResource
       case other =>
         throw new AnalysisException(s"Resource Type '$resourceType' is not supported.")
     }

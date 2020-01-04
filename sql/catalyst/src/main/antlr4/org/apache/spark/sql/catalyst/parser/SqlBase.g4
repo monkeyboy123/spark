@@ -139,7 +139,8 @@ statement
     | ALTER VIEW tableIdentifier AS? query                             #alterViewQuery
     | CREATE (OR REPLACE)? TEMPORARY? FUNCTION (IF NOT EXISTS)?
         qualifiedName AS className=STRING
-        (USING resource (',' resource)*)?                              #createFunction
+        (USING resource (',' resource)*)?
+        (TYPE functionType)?                                           #createFunction
     | DROP TEMPORARY? FUNCTION (IF EXISTS)? qualifiedName              #dropFunction
     | EXPLAIN (LOGICAL | FORMATTED | EXTENDED | CODEGEN | COST)?
         statement                                                      #explain
@@ -335,6 +336,10 @@ storageHandler
 
 resource
     : identifier STRING
+    ;
+
+functionType
+    : STRING
     ;
 
 queryNoWith
@@ -932,6 +937,7 @@ OVERWRITE: 'OVERWRITE';
 TRANSFORM: 'TRANSFORM';
 REDUCE: 'REDUCE';
 USING: 'USING';
+TYPE: 'TYPE';
 SERDE: 'SERDE';
 SERDEPROPERTIES: 'SERDEPROPERTIES';
 RECORDREADER: 'RECORDREADER';
