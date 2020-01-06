@@ -20,21 +20,23 @@ package org.apache.spark.sql.sources.v2
 import java.io.File
 import java.util.{ArrayList, List => JList}
 
+import java.util
+import org.apache.spark.SparkException
 import test.org.apache.spark.sql.sources.v2._
 
-import org.apache.spark.SparkException
 import org.apache.spark.sql.{DataFrame, QueryTest, Row}
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.execution.datasources.v2.{DataSourceV2Relation, DataSourceV2ScanExec}
 import org.apache.spark.sql.execution.exchange.{Exchange, ShuffleExchangeExec}
 import org.apache.spark.sql.execution.vectorized.OnHeapColumnVector
 import org.apache.spark.sql.functions._
-import org.apache.spark.sql.sources.{Filter, GreaterThan}
-import org.apache.spark.sql.sources.v2.reader._
+import org.apache.spark.sql.sources.{EqualTo, Filter, GreaterThan, LessThan}
+import org.apache.spark.sql.sources.v2.reader.{InputPartitionReader, _}
 import org.apache.spark.sql.sources.v2.reader.partitioning.{ClusteredDistribution, Distribution, Partitioning}
 import org.apache.spark.sql.test.SharedSQLContext
 import org.apache.spark.sql.types.{IntegerType, StructType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
+import org.apache.spark.unsafe.types.UTF8String
 
 class DataSourceV2Suite extends QueryTest with SharedSQLContext {
   import testImplicits._
@@ -128,6 +130,17 @@ class DataSourceV2Suite extends QueryTest with SharedSQLContext {
         checkAnswer(df, (0 until 90).map(i => Row(i, -i)))
         checkAnswer(df.select('j), (0 until 90).map(i => Row(-i)))
         checkAnswer(df.filter('i > 50), (51 until 90).map(i => Row(i, -i)))
+      }
+    }
+  }
+
+  test("example source implementation") {
+    Seq(classOf[ExampleDataSourceV2]).foreach { cls =>
+      withClue(cls.getName) {
+        val df = spark.read.format(cls.getName).load()
+          .select("name").filter("name == 'ss'")
+        df.explain(true)
+        df.show()
       }
     }
   }
@@ -509,6 +522,98 @@ class SchemaRequiredDataSource extends DataSourceV2 with ReadSupport {
 
   override def createReader(schema: StructType, options: DataSourceOptions): DataSourceReader = {
     new Reader(schema)
+  }
+}
+
+class ExampleDataSourceV2 extends DataSourceV2 with ReadSupport {
+
+  override def createReader(options: DataSourceOptions): DataSourceReader = {
+    new ExampleDataSourceReader(options)
+  }
+
+  class ExampleDataSourceReader(options: DataSourceOptions) extends DataSourceReader
+    with SupportsPushDownRequiredColumns with SupportsPushDownFilters {
+
+    var requiredSchema: StructType = new StructType().add("name", "string")
+      .add("age", "int").add("sex", "string")
+
+    val supporttedFilters = new util.ArrayList[Filter]
+
+    override def pruneColumns(requiredSchema: StructType): Unit = {
+      this.requiredSchema = requiredSchema
+    }
+
+    override def pushFilters(filters: Array[Filter]): Array[Filter] = {
+      if (filters.isEmpty) {
+        return filters
+      }
+      val unsupporttedFilters = new util.ArrayList[Filter]
+      filters.foreach {
+        case f: EqualTo => supporttedFilters.add(f)
+        case f: GreaterThan => supporttedFilters.add(f)
+        case f: LessThan => supporttedFilters.add(f)
+        case f@_ => unsupporttedFilters.add(f)
+      }
+      import scala.collection.JavaConverters._
+      unsupporttedFilters.asScala.toArray
+    }
+
+    override def pushedFilters(): Array[Filter] = {
+      import scala.collection.JavaConverters._
+      supporttedFilters.asScala.toArray
+    }
+
+    override def readSchema(): StructType = {
+      requiredSchema
+    }
+
+    override def planInputPartitions(): JList[InputPartition[InternalRow]] = {
+
+      val result = new util.ArrayList[InputPartition[InternalRow]]()
+      val partitions = options.getInt("partitions", 2)
+      val cycleCount = options.getInt("cycleCount", 2)
+      for (count <- 1 to partitions) {
+        result.add(new ExampleInputPartition(requiredSchema, supporttedFilters, cycleCount))
+      }
+      result
+    }
+  }
+}
+
+class ExampleInputPartition(requiredSchema: StructType, supporttedFilters: util.ArrayList[Filter]
+                            , cycleCount: Int) extends InputPartition[InternalRow] {
+  override def createPartitionReader(): InputPartitionReader[InternalRow] = {
+    new ExamplePartitionReader(cycleCount)
+  }
+
+  class ExamplePartitionReader(var cycleCount: Int) extends InputPartitionReader[InternalRow] {
+    var name = "name"
+    var age = 0
+    var sex = "male"
+    override def next(): Boolean = {
+      cycleCount = cycleCount -1
+      if (cycleCount >=0) {
+        name = s"name_$cycleCount"
+        age = cycleCount
+        sex = s"sex_$cycleCount"
+        return true
+      }
+      return false
+    }
+
+    override def get(): InternalRow = {
+      InternalRow.fromSeq(requiredSchema.fields.map { elem => {
+        elem.name match {
+          case f: String if (f == "name") => UTF8String.fromString(name)
+          case f: String if (f == "sex") => UTF8String.fromString(sex)
+          case f: String if (f == "age") => age
+        }
+        }
+      })
+    }
+
+    override def close(): Unit = {
+    }
   }
 }
 
