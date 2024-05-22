@@ -20,7 +20,7 @@ import unittest
 from typing import Optional
 
 from pyspark import InheritableThread, inheritable_thread_target
-from pyspark.sql.connect.client import ChannelBuilder
+from pyspark.sql.connect.client import DefaultChannelBuilder
 from pyspark.sql.connect.session import SparkSession as RemoteSparkSession
 from pyspark.testing.connectutils import should_test_connect
 
@@ -28,7 +28,7 @@ if should_test_connect:
     from pyspark.testing.connectutils import ReusedConnectTestCase
 
 
-class CustomChannelBuilder(ChannelBuilder):
+class CustomChannelBuilder(DefaultChannelBuilder):
     @property
     def userId(self) -> Optional[str]:
         return "abc"
@@ -76,6 +76,34 @@ class SparkSessionTestCase(unittest.TestCase):
 
         self.assertIs(session, session2)
         session.stop()
+
+    def test_active_session_expires_when_client_closes(self):
+        s1 = RemoteSparkSession.builder.remote("sc://other").getOrCreate()
+        s2 = RemoteSparkSession.getActiveSession()
+
+        self.assertIs(s1, s2)
+
+        # We don't call close() to avoid executing ExecutePlanResponseReattachableIterator
+        s1._client._closed = True
+
+        self.assertIsNone(RemoteSparkSession.getActiveSession())
+        s3 = RemoteSparkSession.builder.remote("sc://other").getOrCreate()
+
+        self.assertIsNot(s1, s3)
+
+    def test_default_session_expires_when_client_closes(self):
+        s1 = RemoteSparkSession.builder.remote("sc://other").getOrCreate()
+        s2 = RemoteSparkSession.getDefaultSession()
+
+        self.assertIs(s1, s2)
+
+        # We don't call close() to avoid executing ExecutePlanResponseReattachableIterator
+        s1._client._closed = True
+
+        self.assertIsNone(RemoteSparkSession.getDefaultSession())
+        s3 = RemoteSparkSession.builder.remote("sc://other").getOrCreate()
+
+        self.assertIsNot(s1, s3)
 
 
 class JobCancellationTests(ReusedConnectTestCase):

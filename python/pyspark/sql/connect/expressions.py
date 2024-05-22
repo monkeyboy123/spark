@@ -89,10 +89,12 @@ class Expression:
     def __init__(self) -> None:
         pass
 
-    def to_plan(self, session: "SparkConnectClient") -> "proto.Expression":
+    def to_plan(  # type: ignore[empty-body]
+        self, session: "SparkConnectClient"
+    ) -> "proto.Expression":
         ...
 
-    def __repr__(self) -> str:
+    def __repr__(self) -> str:  # type: ignore[empty-body]
         ...
 
     def alias(self, *alias: str, **kwargs: Any) -> "ColumnAlias":
@@ -105,7 +107,7 @@ class Expression:
         assert not kwargs, "Unexpected kwargs where passed: %s" % kwargs
         return ColumnAlias(self, list(alias), metadata)
 
-    def name(self) -> str:
+    def name(self) -> str:  # type: ignore[empty-body]
         ...
 
 
@@ -453,7 +455,10 @@ class LiteralExpression(Expression):
         return expr
 
     def __repr__(self) -> str:
-        return f"{self._value}"
+        if self._value is None:
+            return "NULL"
+        else:
+            return f"{self._value}"
 
 
 class ColumnReference(Expression):
@@ -494,19 +499,23 @@ class ColumnReference(Expression):
 
 
 class UnresolvedStar(Expression):
-    def __init__(self, unparsed_target: Optional[str]):
+    def __init__(self, unparsed_target: Optional[str], plan_id: Optional[int] = None):
         super().__init__()
 
         if unparsed_target is not None:
             assert isinstance(unparsed_target, str) and unparsed_target.endswith(".*")
-
         self._unparsed_target = unparsed_target
+
+        assert plan_id is None or isinstance(plan_id, int)
+        self._plan_id = plan_id
 
     def to_plan(self, session: "SparkConnectClient") -> "proto.Expression":
         expr = proto.Expression()
         expr.unresolved_star.SetInParent()
         if self._unparsed_target is not None:
             expr.unresolved_star.unparsed_target = self._unparsed_target
+        if self._plan_id is not None:
+            expr.unresolved_star.plan_id = self._plan_id
         return expr
 
     def __repr__(self) -> str:
@@ -530,6 +539,7 @@ class SQLExpression(Expression):
 
     def __init__(self, expr: str) -> None:
         super().__init__()
+        assert isinstance(expr, str)
         self._expr: str = expr
 
     def to_plan(self, session: "SparkConnectClient") -> proto.Expression:
@@ -540,6 +550,9 @@ class SQLExpression(Expression):
 
     def __eq__(self, other: Any) -> bool:
         return other is not None and isinstance(other, SQLExpression) and other._expr == self._expr
+
+    def __repr__(self) -> str:
+        return self._expr
 
 
 class SortOrder(Expression):
@@ -831,10 +844,16 @@ class CastExpression(Expression):
         self,
         expr: Expression,
         data_type: Union[DataType, str],
+        eval_mode: Optional[str] = None,
     ) -> None:
         super().__init__()
         self._expr = expr
+        assert isinstance(data_type, (DataType, str))
         self._data_type = data_type
+        if eval_mode is not None:
+            assert isinstance(eval_mode, str)
+            assert eval_mode in ["legacy", "ansi", "try"]
+        self._eval_mode = eval_mode
 
     def to_plan(self, session: "SparkConnectClient") -> proto.Expression:
         fun = proto.Expression()
@@ -843,10 +862,30 @@ class CastExpression(Expression):
             fun.cast.type_str = self._data_type
         else:
             fun.cast.type.CopyFrom(pyspark_types_to_proto_types(self._data_type))
+
+        if self._eval_mode is not None:
+            if self._eval_mode == "legacy":
+                fun.cast.eval_mode = proto.Expression.Cast.EvalMode.EVAL_MODE_LEGACY
+            elif self._eval_mode == "ansi":
+                fun.cast.eval_mode = proto.Expression.Cast.EvalMode.EVAL_MODE_ANSI
+            elif self._eval_mode == "try":
+                fun.cast.eval_mode = proto.Expression.Cast.EvalMode.EVAL_MODE_TRY
+
         return fun
 
     def __repr__(self) -> str:
-        return f"({self._expr} ({self._data_type}))"
+        # We cannot guarantee the string representations be exactly the same, e.g.
+        # str(sf.col("a").cast("long")):
+        #   Column<'CAST(a AS BIGINT)'>     <- Spark Classic
+        #   Column<'CAST(a AS LONG)'>       <- Spark Connect
+        if isinstance(self._data_type, DataType):
+            str_data_type = self._data_type.simpleString().upper()
+        else:
+            str_data_type = str(self._data_type).upper()
+        if self._eval_mode is not None and self._eval_mode == "try":
+            return f"TRY_CAST({self._expr} AS {str_data_type})"
+        else:
+            return f"CAST({self._expr} AS {str_data_type})"
 
 
 class UnresolvedNamedLambdaVariable(Expression):

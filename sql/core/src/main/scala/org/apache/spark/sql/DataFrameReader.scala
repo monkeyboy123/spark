@@ -17,12 +17,11 @@
 
 package org.apache.spark.sql
 
-import java.util.{Locale, Properties, ServiceConfigurationError}
+import java.util.{Locale, Properties}
 
 import scala.jdk.CollectionConverters._
-import scala.util.{Failure, Success, Try}
 
-import org.apache.spark.{Partition, SparkClassNotFoundException, SparkThrowable}
+import org.apache.spark.Partition
 import org.apache.spark.annotation.Stable
 import org.apache.spark.api.java.JavaRDD
 import org.apache.spark.internal.Logging
@@ -78,6 +77,7 @@ class DataFrameReader private[sql](sparkSession: SparkSession) extends Logging {
     if (schema != null) {
       val replaced = CharVarcharUtils.failIfHasCharVarchar(schema).asInstanceOf[StructType]
       this.userSpecifiedSchema = Option(replaced)
+      validateSingleVariantColumn()
     }
     this
   }
@@ -107,6 +107,7 @@ class DataFrameReader private[sql](sparkSession: SparkSession) extends Logging {
    */
   def option(key: String, value: String): DataFrameReader = {
     this.extraOptions = this.extraOptions + (key -> value)
+    validateSingleVariantColumn()
     this
   }
 
@@ -150,6 +151,7 @@ class DataFrameReader private[sql](sparkSession: SparkSession) extends Logging {
    */
   def options(options: scala.collection.Map[String, String]): DataFrameReader = {
     this.extraOptions ++= options
+    validateSingleVariantColumn()
     this
   }
 
@@ -209,45 +211,10 @@ class DataFrameReader private[sql](sparkSession: SparkSession) extends Logging {
       throw QueryCompilationErrors.pathOptionNotSetCorrectlyWhenReadingError()
     }
 
-    val isUserDefinedDataSource =
-      sparkSession.sessionState.dataSourceManager.dataSourceExists(source)
-
-    Try(DataSource.lookupDataSourceV2(source, sparkSession.sessionState.conf)) match {
-      case Success(providerOpt) =>
-        // The source can be successfully loaded as either a V1 or a V2 data source.
-        // Check if it is also a user-defined data source.
-        if (isUserDefinedDataSource) {
-          throw QueryCompilationErrors.foundMultipleDataSources(source)
-        }
-        providerOpt.flatMap { provider =>
-          DataSourceV2Utils.loadV2Source(
-            sparkSession, provider, userSpecifiedSchema, extraOptions, source, paths: _*)
-        }.getOrElse(loadV1Source(paths: _*))
-      case Failure(exception) =>
-        // Exceptions are thrown while trying to load the data source as a V1 or V2 data source.
-        // For the following not found exceptions, if the user-defined data source is defined,
-        // we can instead return the user-defined data source.
-        val isNotFoundError = exception match {
-          case _: NoClassDefFoundError | _: SparkClassNotFoundException => true
-          case e: SparkThrowable => e.getErrorClass == "DATA_SOURCE_NOT_FOUND"
-          case e: ServiceConfigurationError => e.getCause.isInstanceOf[NoClassDefFoundError]
-          case _ => false
-        }
-        if (isNotFoundError && isUserDefinedDataSource) {
-          loadUserDefinedDataSource(paths)
-        } else {
-          // Throw the original exception.
-          throw exception
-        }
-    }
-  }
-
-  private def loadUserDefinedDataSource(paths: Seq[String]): DataFrame = {
-    val builder = sparkSession.sessionState.dataSourceManager.lookupDataSource(source)
-    // Add `path` and `paths` options to the extra options if specified.
-    val optionsWithPath = DataSourceV2Utils.getOptionsWithPaths(extraOptions, paths: _*)
-    val plan = builder(sparkSession, source, userSpecifiedSchema, optionsWithPath)
-    Dataset.ofRows(sparkSession, plan)
+    DataSource.lookupDataSourceV2(source, sparkSession.sessionState.conf).flatMap { provider =>
+      DataSourceV2Utils.loadV2Source(sparkSession, provider, userSpecifiedSchema, extraOptions,
+        source, paths: _*)
+    }.getOrElse(loadV1Source(paths: _*))
   }
 
   private def loadV1Source(paths: String*) = {
@@ -799,6 +766,17 @@ class DataFrameReader private[sql](sparkSession: SparkSession) extends Logging {
   private def assertNoSpecifiedSchema(operation: String): Unit = {
     if (userSpecifiedSchema.nonEmpty) {
       throw QueryCompilationErrors.userSpecifiedSchemaUnsupportedError(operation)
+    }
+  }
+
+  /**
+   * Ensure that the `singleVariantColumn` option cannot be used if there is also a user specified
+   * schema.
+   */
+  private def validateSingleVariantColumn(): Unit = {
+    if (extraOptions.get(JSONOptions.SINGLE_VARIANT_COLUMN).isDefined &&
+      userSpecifiedSchema.isDefined) {
+      throw QueryCompilationErrors.invalidSingleVariantColumn()
     }
   }
 

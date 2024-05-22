@@ -17,7 +17,7 @@
 
 package org.apache.spark.sql.execution
 
-import org.apache.spark.{SparkArithmeticException, SparkException, SparkFileNotFoundException}
+import org.apache.spark.{SparkArithmeticException, SparkException}
 import org.apache.spark.sql._
 import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.catalyst.expressions.{Add, Alias, Divide}
@@ -899,46 +899,48 @@ abstract class SQLViewSuite extends QueryTest with SQLTestUtils {
 
   test("resolve a view when the dataTypes of referenced table columns changed") {
     withTable("tab1") {
-      spark.range(1, 10).selectExpr("id", "id + 1 id1").write.saveAsTable("tab1")
-      withView("testView") {
-        sql("CREATE VIEW testView AS SELECT * FROM tab1")
+      withSQLConf("spark.sql.legacy.viewSchemaCompensation" -> "false") {
+        spark.range(1, 10).selectExpr("id", "id + 1 id1").write.saveAsTable("tab1")
+        withView("testView") {
+          sql("CREATE VIEW testView AS SELECT * FROM tab1")
 
-        // Allow casting from IntegerType to LongType
-        val df = (1 until 10).map(i => (i, i + 1)).toDF("id", "id1")
-        df.write.format("json").mode(SaveMode.Overwrite).saveAsTable("tab1")
-        checkAnswer(sql("SELECT * FROM testView ORDER BY id1"), (1 to 9).map(i => Row(i, i + 1)))
+          // Allow casting from IntegerType to LongType
+          val df = (1 until 10).map(i => (i, i + 1)).toDF("id", "id1")
+          df.write.format("json").mode(SaveMode.Overwrite).saveAsTable("tab1")
+          checkAnswer(sql("SELECT * FROM testView ORDER BY id1"), (1 to 9).map(i => Row(i, i + 1)))
 
-        // Casting from DoubleType to LongType might truncate, throw an AnalysisException.
-        val df2 = (1 until 10).map(i => (i.toDouble, i.toDouble)).toDF("id", "id1")
-        df2.write.format("json").mode(SaveMode.Overwrite).saveAsTable("tab1")
-        checkError(
-          exception = intercept[AnalysisException](sql("SELECT * FROM testView")),
-          errorClass = "CANNOT_UP_CAST_DATATYPE",
-          parameters = Map(
-            "expression" -> s"$SESSION_CATALOG_NAME.default.tab1.id",
-            "sourceType" -> "\"DOUBLE\"",
-            "targetType" -> "\"BIGINT\"",
-            "details" -> ("The type path of the target object is:\n\n" +
-              "You can either add an explicit cast to the input data or " +
-              "choose a higher precision type of the field in the target object")
+          // Casting from DoubleType to LongType might truncate, throw an AnalysisException.
+          val df2 = (1 until 10).map(i => (i.toDouble, i.toDouble)).toDF("id", "id1")
+          df2.write.format("json").mode(SaveMode.Overwrite).saveAsTable("tab1")
+          checkError(
+            exception = intercept[AnalysisException](sql("SELECT * FROM testView")),
+            errorClass = "CANNOT_UP_CAST_DATATYPE",
+            parameters = Map(
+              "expression" -> s"$SESSION_CATALOG_NAME.default.tab1.id",
+              "sourceType" -> "\"DOUBLE\"",
+              "targetType" -> "\"BIGINT\"",
+              "details" -> ("The type path of the target object is:\n\n" +
+                "You can either add an explicit cast to the input data or " +
+                "choose a higher precision type of the field in the target object")
+            )
           )
-        )
 
-        // Can't cast from ArrayType to LongType, throw an AnalysisException.
-        val df3 = (1 until 10).map(i => (i, Seq(i))).toDF("id", "id1")
-        df3.write.format("json").mode(SaveMode.Overwrite).saveAsTable("tab1")
-        checkError(
-          exception = intercept[AnalysisException](sql("SELECT * FROM testView")),
-          errorClass = "CANNOT_UP_CAST_DATATYPE",
-          parameters = Map(
-            "expression" -> s"$SESSION_CATALOG_NAME.default.tab1.id1",
-            "sourceType" -> "\"ARRAY<INT>\"",
-            "targetType" -> "\"BIGINT\"",
-            "details" -> ("The type path of the target object is:\n\n" +
-              "You can either add an explicit cast to the input data or " +
-              "choose a higher precision type of the field in the target object")
+          // Can't cast from ArrayType to LongType, throw an AnalysisException.
+          val df3 = (1 until 10).map(i => (i, Seq(i))).toDF("id", "id1")
+          df3.write.format("json").mode(SaveMode.Overwrite).saveAsTable("tab1")
+          checkError(
+            exception = intercept[AnalysisException](sql("SELECT * FROM testView")),
+            errorClass = "CANNOT_UP_CAST_DATATYPE",
+            parameters = Map(
+              "expression" -> s"$SESSION_CATALOG_NAME.default.tab1.id1",
+              "sourceType" -> "\"ARRAY<INT>\"",
+              "targetType" -> "\"BIGINT\"",
+              "details" -> ("The type path of the target object is:\n\n" +
+                "You can either add an explicit cast to the input data or " +
+                "choose a higher precision type of the field in the target object")
+            )
           )
-        )
+        }
       }
     }
   }
@@ -1068,9 +1070,9 @@ abstract class SQLViewSuite extends QueryTest with SQLTestUtils {
           checkErrorMatchPVals(
             exception = intercept[SparkException] {
               sql("SELECT * FROM v1").collect()
-            }.getCause.asInstanceOf[SparkFileNotFoundException],
-            errorClass = "_LEGACY_ERROR_TEMP_2055",
-            parameters = Map("message" -> ".* does not exist")
+            },
+            errorClass = "FAILED_READ_FILE.FILE_NOT_EXIST",
+            parameters = Map("path" -> ".*")
           )
         }
 
@@ -1088,9 +1090,9 @@ abstract class SQLViewSuite extends QueryTest with SQLTestUtils {
           checkErrorMatchPVals(
             exception = intercept[SparkException] {
               sql("SELECT * FROM v1").collect()
-            }.getCause.asInstanceOf[SparkFileNotFoundException],
-            errorClass = "_LEGACY_ERROR_TEMP_2055",
-            parameters = Map("message" -> ".* does not exist")
+            },
+            errorClass = "FAILED_READ_FILE.FILE_NOT_EXIST",
+            parameters = Map("path" -> ".*")
           )
         }
       }
@@ -1304,6 +1306,20 @@ abstract class SQLViewSuite extends QueryTest with SQLTestUtils {
                 |""".stripMargin),
           Seq(Row(1), Row(1)))
       }
+    }
+  }
+
+  test("Inline table with current time expression") {
+    withView("v1") {
+      sql("CREATE VIEW v1 (t1, t2) AS SELECT * FROM VALUES (now(), now())")
+      val r1 = sql("select t1, t2 from v1").collect()(0)
+      val ts1 = (r1.getTimestamp(0), r1.getTimestamp(1))
+      assert(ts1._1 == ts1._2)
+      Thread.sleep(1)
+      val r2 = sql("select t1, t2 from v1").collect()(0)
+      val ts2 = (r2.getTimestamp(0), r2.getTimestamp(1))
+      assert(ts2._1 == ts2._2)
+      assert(ts1._1.getTime < ts2._1.getTime)
     }
   }
 }

@@ -169,7 +169,7 @@ _options: List[Option] = [
             "can be expensive in general. So, if `compute.ops_on_diff_frames` variable is not "
             "True, that method throws an exception."
         ),
-        default=False,
+        default=True,
         types=bool,
     ),
     Option(
@@ -258,6 +258,15 @@ _options: List[Option] = [
             lambda v: v >= 0,
             "'compute.isin_limit' should be greater than or equal to 0.",
         ),
+    ),
+    Option(
+        key="compute.pandas_fallback",
+        doc=(
+            "'compute.pandas_fallback' sets whether or not to fallback automatically "
+            "to Pandas' implementation."
+        ),
+        default=False,
+        types=bool,
     ),
     Option(
         key="plotting.max_rows",

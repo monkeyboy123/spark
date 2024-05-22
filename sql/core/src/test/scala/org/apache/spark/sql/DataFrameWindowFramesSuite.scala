@@ -18,9 +18,11 @@
 package org.apache.spark.sql
 
 import org.apache.spark.sql.catalyst.expressions.{Ascending, Literal, NonFoldableLiteral, RangeFrame, SortOrder, SpecifiedWindowFrame, UnaryMinus, UnspecifiedFrame}
+import org.apache.spark.sql.catalyst.optimizer.EliminateWindowPartitions
 import org.apache.spark.sql.catalyst.plans.logical.{Window => WindowNode}
 import org.apache.spark.sql.expressions.{Window, WindowSpec}
 import org.apache.spark.sql.functions._
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.test.SharedSparkSession
 import org.apache.spark.sql.types.CalendarIntervalType
 
@@ -29,6 +31,28 @@ import org.apache.spark.sql.types.CalendarIntervalType
  */
 class DataFrameWindowFramesSuite extends QueryTest with SharedSparkSession {
   import testImplicits._
+
+  test("reuse window partitionBy") {
+    val df = Seq((1, "1"), (2, "2"), (1, "1"), (2, "2")).toDF("key", "value")
+    val w = Window.partitionBy("key").orderBy("value")
+
+    checkAnswer(
+      df.select(
+        lead("key", 1).over(w),
+        lead("value", 1).over(w)),
+      Row(1, "1") :: Row(2, "2") :: Row(null, null) :: Row(null, null) :: Nil)
+  }
+
+  test("reuse window orderBy") {
+    val df = Seq((1, "1"), (2, "2"), (1, "1"), (2, "2")).toDF("key", "value")
+    val w = Window.orderBy("value").partitionBy("key")
+
+    checkAnswer(
+      df.select(
+        lead("key", 1).over(w),
+        lead("value", 1).over(w)),
+      Row(1, "1") :: Row(2, "2") :: Row(null, null) :: Row(null, null) :: Nil)
+  }
 
   test("lead/lag with empty data frame") {
     val df = Seq.empty[(Int, String)].toDF("key", "value")
@@ -547,5 +571,51 @@ class DataFrameWindowFramesSuite extends QueryTest with SharedSparkSession {
     checkAnswer(
       df,
       Row(1) :: Row(1) :: Nil)
+  }
+
+  test("SPARK-45352: Eliminate foldable window partitions") {
+    val df = Seq((1, 1), (1, 2), (1, 3), (2, 1), (2, 2)).toDF("a", "b")
+
+    Seq(true, false).foreach { eliminateWindowPartitionsEnabled =>
+      val excludedRules =
+        if (eliminateWindowPartitionsEnabled) "" else EliminateWindowPartitions.ruleName
+      withSQLConf(SQLConf.OPTIMIZER_EXCLUDED_RULES.key -> excludedRules) {
+        val window1 = Window.partitionBy(lit(1)).orderBy($"b")
+        checkAnswer(
+          df.select($"a", $"b", row_number().over(window1)),
+          Seq(Row(1, 1, 1), Row(1, 2, 3), Row(1, 3, 5), Row(2, 1, 2), Row(2, 2, 4)))
+
+        val window2 = Window.partitionBy($"a", lit(1)).orderBy($"b")
+        checkAnswer(
+          df.select($"a", $"b", row_number().over(window2)),
+          Seq(Row(1, 1, 1), Row(1, 2, 2), Row(1, 3, 3), Row(2, 1, 1), Row(2, 2, 2)))
+      }
+    }
+  }
+
+  test("SPARK-34227: WindowFunctionFrame should clear its states during preparation") {
+    // This creates a single partition dataframe with 3 records:
+    //   "a", 0, null
+    //   "a", 1, "x"
+    //   "b", 0, null
+    val df = spark.range(0, 3, 1, 1).select(
+      when($"id" < 2, lit("a")).otherwise(lit("b")).as("key"),
+      ($"id" % 2).cast("int").as("order"),
+      when($"id" % 2 === 0, lit(null)).otherwise(lit("x")).as("value"))
+
+    val window1 = Window.partitionBy($"key").orderBy($"order")
+      .rowsBetween(Window.unboundedPreceding, Window.unboundedFollowing)
+    val window2 = Window.partitionBy($"key").orderBy($"order")
+      .rowsBetween(Window.unboundedPreceding, Window.currentRow)
+    checkAnswer(
+      df.select(
+        $"key",
+        $"order",
+        nth_value($"value", 1, ignoreNulls = true).over(window1),
+        nth_value($"value", 1, ignoreNulls = true).over(window2)),
+      Seq(
+        Row("a", 0, "x", null),
+        Row("a", 1, "x", "x"),
+        Row("b", 0, null, null)))
   }
 }

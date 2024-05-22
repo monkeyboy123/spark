@@ -32,8 +32,8 @@ import org.apache.spark.annotation.DeveloperApi
 
 /**
  * A reader to load error information from one or more JSON files. Note that, if one error appears
- * in more than one JSON files, the latter wins. Please read core/src/main/resources/error/README.md
- * for more details.
+ * in more than one JSON files, the latter wins.
+ * Please read common/utils/src/main/resources/error/README.md for more details.
  */
 @DeveloperApi
 class ErrorClassesJsonReader(jsonFileURLs: Seq[URL]) {
@@ -49,18 +49,19 @@ class ErrorClassesJsonReader(jsonFileURLs: Seq[URL]) {
     sub.setEnableUndefinedVariableException(true)
     sub.setDisableSubstitutionInValues(true)
     try {
-      sub.replace(messageTemplate.replaceAll("<([a-zA-Z0-9_-]+)>", "\\$\\{$1\\}"))
+      sub.replace(ErrorClassesJsonReader.TEMPLATE_REGEX.replaceAllIn(
+        messageTemplate, "\\$\\{$1\\}"))
     } catch {
-      case _: IllegalArgumentException => throw SparkException.internalError(
-        s"Undefined error message parameter for error class: '$errorClass'. " +
-          s"Parameters: $messageParameters")
+      case i: IllegalArgumentException => throw SparkException.internalError(
+        s"Undefined error message parameter for error class: '$errorClass', " +
+          s"MessageTemplate: $messageTemplate, " +
+          s"Parameters: $messageParameters", i)
     }
   }
 
   def getMessageParameters(errorClass: String): Seq[String] = {
     val messageTemplate = getMessageTemplate(errorClass)
-    val pattern = "<([a-zA-Z0-9_-]+)>".r
-    val matches = pattern.findAllIn(messageTemplate).toSeq
+    val matches = ErrorClassesJsonReader.TEMPLATE_REGEX.findAllIn(messageTemplate).toSeq
     matches.map(m => m.stripSuffix(">").stripPrefix("<"))
   }
 
@@ -106,6 +107,8 @@ class ErrorClassesJsonReader(jsonFileURLs: Seq[URL]) {
 }
 
 private object ErrorClassesJsonReader {
+  private val TEMPLATE_REGEX = "<([a-zA-Z0-9_-]+)>".r
+
   private val mapper: JsonMapper = JsonMapper.builder()
     .addModule(DefaultScalaModule)
     .build()
@@ -153,3 +156,17 @@ private case class ErrorSubInfo(message: Seq[String]) {
   @JsonIgnore
   val messageTemplate: String = message.mkString("\n")
 }
+
+/**
+ * Information associated with an error state / SQLSTATE.
+ *
+ * @param description What the error state means.
+ * @param origin The DBMS where this error state was first defined.
+ * @param standard Whether this error state is part of the SQL standard.
+ * @param usedBy What database systems use this error state.
+ */
+private case class ErrorStateInfo(
+    description: String,
+    origin: String,
+    standard: String,
+    usedBy: List[String])

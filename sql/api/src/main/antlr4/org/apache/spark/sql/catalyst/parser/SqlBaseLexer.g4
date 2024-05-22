@@ -79,6 +79,7 @@ COMMA: ',';
 DOT: '.';
 LEFT_BRACKET: '[';
 RIGHT_BRACKET: ']';
+BANG: '!';
 
 // NOTE: If you add a new token in the list below, you should update the list of keywords
 // and reserved tag in `docs/sql-ref-ansi-compliance.md#sql-keywords`, and
@@ -107,6 +108,7 @@ AUTHORIZATION: 'AUTHORIZATION';
 BETWEEN: 'BETWEEN';
 BIGINT: 'BIGINT';
 BINARY: 'BINARY';
+BINDING: 'BINDING';
 BOOLEAN: 'BOOLEAN';
 BOTH: 'BOTH';
 BUCKET: 'BUCKET';
@@ -128,6 +130,7 @@ CLUSTER: 'CLUSTER';
 CLUSTERED: 'CLUSTERED';
 CODEGEN: 'CODEGEN';
 COLLATE: 'COLLATE';
+COLLATION: 'COLLATION';
 COLLECTION: 'COLLECTION';
 COLUMN: 'COLUMN';
 COLUMNS: 'COLUMNS';
@@ -135,6 +138,7 @@ COMMENT: 'COMMENT';
 COMMIT: 'COMMIT';
 COMPACT: 'COMPACT';
 COMPACTIONS: 'COMPACTIONS';
+COMPENSATION: 'COMPENSATION';
 COMPUTE: 'COMPUTE';
 CONCATENATE: 'CONCATENATE';
 CONSTRAINT: 'CONSTRAINT';
@@ -180,6 +184,7 @@ ELSE: 'ELSE';
 END: 'END';
 ESCAPE: 'ESCAPE';
 ESCAPED: 'ESCAPED';
+EVOLUTION: 'EVOLUTION';
 EXCEPT: 'EXCEPT';
 EXCHANGE: 'EXCHANGE';
 EXCLUDE: 'EXCLUDE';
@@ -217,6 +222,7 @@ HOURS: 'HOURS';
 IDENTIFIER_KW: 'IDENTIFIER';
 IF: 'IF';
 IGNORE: 'IGNORE';
+IMMEDIATE: 'IMMEDIATE';
 IMPORT: 'IMPORT';
 IN: 'IN';
 INCLUDE: 'INCLUDE';
@@ -272,7 +278,7 @@ NANOSECOND: 'NANOSECOND';
 NANOSECONDS: 'NANOSECONDS';
 NATURAL: 'NATURAL';
 NO: 'NO';
-NOT: 'NOT' | '!';
+NOT: 'NOT';
 NULL: 'NULL';
 NULLS: 'NULLS';
 NUMERIC: 'NUMERIC';
@@ -294,8 +300,6 @@ OVERWRITE: 'OVERWRITE';
 PARTITION: 'PARTITION';
 PARTITIONED: 'PARTITIONED';
 PARTITIONS: 'PARTITIONS';
-PERCENTILE_CONT: 'PERCENTILE_CONT';
-PERCENTILE_DISC: 'PERCENTILE_DISC';
 PERCENTLIT: 'PERCENT';
 PIVOT: 'PIVOT';
 PLACING: 'PLACING';
@@ -381,6 +385,7 @@ TIMESTAMPADD: 'TIMESTAMPADD';
 TIMESTAMPDIFF: 'TIMESTAMPDIFF';
 TINYINT: 'TINYINT';
 TO: 'TO';
+EXECUTE: 'EXECUTE';
 TOUCH: 'TOUCH';
 TRAILING: 'TRAILING';
 TRANSACTION: 'TRANSACTION';
@@ -508,8 +513,13 @@ BIGDECIMAL_LITERAL
     | DECIMAL_DIGITS EXPONENT? 'BD' {isValidDecimal()}?
     ;
 
+// Generalize the identifier to give a sensible INVALID_IDENTIFIER error message:
+// * Unicode letters rather than a-z and A-Z only
+// * URI paths for table references using paths
+// We then narrow down to ANSI rules in exitUnquotedIdentifier() in the parser.
 IDENTIFIER
-    : (LETTER | DIGIT | '_')+
+    : (UNICODE_LETTER | DIGIT | '_')+
+    | UNICODE_LETTER+ '://' (UNICODE_LETTER | DIGIT | '_' | '/' | '-' | '.' | '?' | '=' | '&' | '#' | '%')+
     ;
 
 BACKQUOTED_IDENTIFIER
@@ -533,6 +543,10 @@ fragment LETTER
     : [A-Z]
     ;
 
+fragment UNICODE_LETTER
+    : [\p{L}]
+    ;
+
 SIMPLE_COMMENT
     : '--' ('\\\n' | ~[\r\n])* '\r'? '\n'? -> channel(HIDDEN)
     ;
@@ -542,7 +556,7 @@ BRACKETED_COMMENT
     ;
 
 WS
-    : [ \r\n\t]+ -> channel(HIDDEN)
+    : [ \t\n\f\r\u000B\u00A0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200A\u2028\u202F\u205F\u3000]+ -> channel(HIDDEN)
     ;
 
 // Catch-all for anything we can't recognize.

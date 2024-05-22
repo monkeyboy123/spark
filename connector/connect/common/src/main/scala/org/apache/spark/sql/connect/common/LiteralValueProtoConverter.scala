@@ -22,7 +22,7 @@ import java.math.{BigDecimal => JBigDecimal}
 import java.sql.{Date, Timestamp}
 import java.time._
 
-import scala.collection.mutable
+import scala.collection.{immutable, mutable}
 import scala.jdk.CollectionConverters._
 import scala.reflect.ClassTag
 import scala.reflect.runtime.universe.TypeTag
@@ -85,6 +85,7 @@ object LiteralValueProtoConverter {
       case v: Array[Char] => builder.setString(String.valueOf(v))
       case v: Array[Byte] => builder.setBinary(ByteString.copyFrom(v))
       case v: mutable.ArraySeq[_] => toLiteralProtoBuilder(v.array)
+      case v: immutable.ArraySeq[_] => toLiteralProtoBuilder(v.unsafeArray)
       case v: LocalDate => builder.setDate(v.toEpochDay.toInt)
       case v: Decimal =>
         builder.setDecimal(decimalBuilder(Math.max(v.precision, v.scale), v.scale, v.toString))
@@ -164,6 +165,8 @@ object LiteralValueProtoConverter {
     (literal, dataType) match {
       case (v: mutable.ArraySeq[_], ArrayType(_, _)) =>
         toLiteralProtoBuilder(v.array, dataType)
+      case (v: immutable.ArraySeq[_], ArrayType(_, _)) =>
+        toLiteralProtoBuilder(v.unsafeArray, dataType)
       case (v: Array[Byte], ArrayType(_, _)) =>
         toLiteralProtoBuilder(v)
       case (v, ArrayType(elementType, _)) =>
@@ -201,7 +204,7 @@ object LiteralValueProtoConverter {
   def toLiteralProto(literal: Any, dataType: DataType): proto.Expression.Literal =
     toLiteralProtoBuilder(literal, dataType).build()
 
-  private def toDataType(clz: Class[_]): DataType = clz match {
+  private[sql] def toDataType(clz: Class[_]): DataType = clz match {
     // primitive types
     case JShort.TYPE => ShortType
     case JInteger.TYPE => IntegerType

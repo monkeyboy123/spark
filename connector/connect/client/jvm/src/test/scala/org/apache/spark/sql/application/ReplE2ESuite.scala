@@ -25,13 +25,13 @@ import scala.util.Properties
 import org.apache.commons.io.output.ByteArrayOutputStream
 import org.scalatest.BeforeAndAfterEach
 
-import org.apache.spark.sql.test.{IntegrationTestUtils, RemoteSparkSession}
+import org.apache.spark.sql.test.{ConnectFunSuite, IntegrationTestUtils, RemoteSparkSession}
 import org.apache.spark.tags.AmmoniteTest
 import org.apache.spark.util.IvyTestUtils
 import org.apache.spark.util.MavenUtils.MavenCoordinate
 
 @AmmoniteTest
-class ReplE2ESuite extends RemoteSparkSession with BeforeAndAfterEach {
+class ReplE2ESuite extends ConnectFunSuite with RemoteSparkSession with BeforeAndAfterEach {
 
   private val executorService = Executors.newSingleThreadExecutor()
   private val TIMEOUT_SECONDS = 30
@@ -395,6 +395,22 @@ class ReplE2ESuite extends RemoteSparkSession with BeforeAndAfterEach {
         |""".stripMargin
     val output = runCommandsInShell(input)
     assertContains("noException: Boolean = true", output)
+  }
+
+  test("broadcast works with REPL generated code") {
+    val input =
+      """
+        |val add1 = udf((i: Long) => i + 1)
+        |val tableA = spark.range(2).alias("a")
+        |val tableB = broadcast(spark.range(2).select(add1(col("id")).alias("id"))).alias("b")
+        |tableA.join(tableB).
+        |  where(col("a.id")===col("b.id")).
+        |  select(col("a.id").alias("a_id"), col("b.id").alias("b_id")).
+        |  collect().
+        |  mkString("[", ", ", "]")
+        |""".stripMargin
+    val output = runCommandsInShell(input)
+    assertContains("""String = "[[1,1]]"""", output)
   }
 
   test("closure cleaner") {

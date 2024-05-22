@@ -17,8 +17,9 @@
 
 package org.apache.spark.sql.catalyst.plans.logical
 
+import org.apache.spark.{SparkIllegalArgumentException, SparkUnsupportedOperationException}
 import org.apache.spark.sql.AnalysisException
-import org.apache.spark.sql.catalyst.analysis.{AnalysisContext, AssignmentUtils, EliminateSubqueryAliases, FieldName, NamedRelation, PartitionSpec, ResolvedIdentifier, UnresolvedException}
+import org.apache.spark.sql.catalyst.analysis.{AnalysisContext, AssignmentUtils, EliminateSubqueryAliases, FieldName, NamedRelation, PartitionSpec, ResolvedIdentifier, UnresolvedException, ViewSchemaMode}
 import org.apache.spark.sql.catalyst.catalog.CatalogTypes.TablePartitionSpec
 import org.apache.spark.sql.catalyst.catalog.FunctionResource
 import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, AttributeSet, Expression, MetadataAttribute, NamedExpression, UnaryExpression, Unevaluable, V2ExpressionUtils}
@@ -417,7 +418,22 @@ trait V2CreateTableAsSelectPlan
 
   override def childrenToAnalyze: Seq[LogicalPlan] = Seq(name, query)
 
-  override def tableSchema: StructType = query.schema
+  override lazy val tableSchema: StructType = query.schema
+
+  override def columns: Seq[ColumnDefinition] = {
+    query.schema.map { field =>
+      ColumnDefinition(
+        field.name,
+        field.dataType,
+        field.nullable,
+        field.getComment(),
+        // The input query can't define column default/generation expressions.
+        defaultValue = None,
+        generationExpression = None,
+        metadata = field.metadata
+      )
+    }
+  }
 
   override protected def withNewChildrenInternal(
       newChildren: IndexedSeq[LogicalPlan]): V2CreateTableAsSelectPlan = {
@@ -426,7 +442,9 @@ trait V2CreateTableAsSelectPlan
       case Seq(newName, newQuery) =>
         withNameAndQuery(newName, newQuery)
       case others =>
-        throw new IllegalArgumentException("Must be 2 children: " + others)
+        throw new SparkIllegalArgumentException(
+          errorClass = "_LEGACY_ERROR_TEMP_3218",
+          messageParameters = Map("others" -> others.toString()))
     }
   }
 
@@ -438,8 +456,12 @@ trait V2CreateTableAsSelectPlan
 /** A trait used for logical plan nodes that create or replace V2 table definitions. */
 trait V2CreateTablePlan extends LogicalPlan {
   def name: LogicalPlan
+
   def partitioning: Seq[Transform]
-  def tableSchema: StructType
+
+  def columns: Seq[ColumnDefinition]
+
+  lazy val tableSchema: StructType = StructType(columns.map(_.toV1Column))
 
   def tableName: Identifier = {
     assert(name.resolved)
@@ -458,7 +480,7 @@ trait V2CreateTablePlan extends LogicalPlan {
  */
 case class CreateTable(
     name: LogicalPlan,
-    tableSchema: StructType,
+    columns: Seq[ColumnDefinition],
     partitioning: Seq[Transform],
     tableSpec: TableSpecBase,
     ignoreIfExists: Boolean)
@@ -510,7 +532,7 @@ case class CreateTableAsSelect(
  */
 case class ReplaceTable(
     name: LogicalPlan,
-    tableSchema: StructType,
+    columns: Seq[ColumnDefinition],
     partitioning: Seq[Transform],
     tableSpec: TableSpecBase,
     orCreate: Boolean)
@@ -732,7 +754,8 @@ case class MergeIntoTable(
     mergeCondition: Expression,
     matchedActions: Seq[MergeAction],
     notMatchedActions: Seq[MergeAction],
-    notMatchedBySourceActions: Seq[MergeAction]) extends BinaryCommand with SupportsSubquery {
+    notMatchedBySourceActions: Seq[MergeAction],
+    withSchemaEvolution: Boolean) extends BinaryCommand with SupportsSubquery {
 
   lazy val aligned: Boolean = {
     val actions = matchedActions ++ notMatchedActions ++ notMatchedBySourceActions
@@ -1271,6 +1294,17 @@ case class AlterViewAs(
 }
 
 /**
+ * The logical plan of the ALTER VIEW ... WITH SCHEMA command.
+ */
+case class AlterViewSchemaBinding(
+    child: LogicalPlan,
+    viewSchemaMode: ViewSchemaMode)
+  extends UnaryCommand {
+  override protected def withNewChildInternal(newChild: LogicalPlan): LogicalPlan =
+    copy(child = newChild)
+}
+
+/**
  * The logical plan of the CREATE VIEW ... command.
  */
 case class CreateView(
@@ -1281,7 +1315,8 @@ case class CreateView(
     originalText: Option[String],
     query: LogicalPlan,
     allowExisting: Boolean,
-    replace: Boolean) extends BinaryCommand with CTEInChildren {
+    replace: Boolean,
+    viewSchemaMode: ViewSchemaMode) extends BinaryCommand with CTEInChildren {
   override def left: LogicalPlan = child
   override def right: LogicalPlan = query
   override protected def withNewChildrenInternal(
@@ -1438,7 +1473,7 @@ case class UnresolvedTableSpec(
     external: Boolean) extends UnaryExpression with Unevaluable with TableSpecBase {
 
   override def dataType: DataType =
-    throw new UnsupportedOperationException("UnresolvedTableSpec doesn't have a data type")
+    throw new SparkUnsupportedOperationException("_LEGACY_ERROR_TEMP_3113")
 
   override def child: Expression = optionExpression
 
@@ -1484,16 +1519,6 @@ case class TableSpec(
   def withNewLocation(newLocation: Option[String]): TableSpec = {
     TableSpec(properties, provider, options, newLocation, comment, serde, external)
   }
-}
-
-/**
- * A fake expression which holds the default value expression and its original SQL text.
- */
-case class DefaultValueExpression(child: Expression, originalSQL: String)
-  extends UnaryExpression with Unevaluable {
-  override def dataType: DataType = child.dataType
-  override protected def withNewChildInternal(newChild: Expression): Expression =
-    copy(child = newChild)
 }
 
 /**

@@ -24,7 +24,6 @@ from pyspark.sql import Row
 from pyspark.sql.functions import lit
 from pyspark.sql.types import StructType, StructField, IntegerType, StringType
 from pyspark.testing.sqlutils import ReusedSQLTestCase
-from pyspark.errors.exceptions.connect import SparkConnectException
 
 
 class StreamingTestsMixin:
@@ -264,56 +263,43 @@ class StreamingTestsMixin:
             shutil.rmtree(tmpPath)
 
     def test_stream_exception(self):
-        sdf = self.spark.readStream.format("text").load("python/test_support/sql/streaming")
-        sq = sdf.writeStream.format("memory").queryName("query_explain").start()
-        try:
-            sq.processAllAvailable()
-            self.assertEqual(sq.exception(), None)
-        finally:
-            sq.stop()
+        with self.sql_conf({"spark.sql.execution.pyspark.udf.simplifiedTraceback.enabled": True}):
+            sdf = self.spark.readStream.format("text").load("python/test_support/sql/streaming")
+            sq = sdf.writeStream.format("memory").queryName("query_explain").start()
+            try:
+                sq.processAllAvailable()
+                self.assertEqual(sq.exception(), None)
+            finally:
+                sq.stop()
 
-        from pyspark.sql.functions import col, udf
-        from pyspark.errors import StreamingQueryException
+            from pyspark.sql.functions import col, udf
+            from pyspark.errors import StreamingQueryException
 
-        bad_udf = udf(lambda x: 1 / 0)
-        sq = (
-            sdf.select(bad_udf(col("value")))
-            .writeStream.format("memory")
-            .queryName("this_query")
-            .start()
-        )
-        try:
-            # Process some data to fail the query
-            sq.processAllAvailable()
-            self.fail("bad udf should fail the query")
-        except StreamingQueryException as e:
-            # This is expected
-            self._assert_exception_tree_contains_msg(e, "ZeroDivisionError")
-        finally:
-            exception = sq.exception()
-            sq.stop()
-        self.assertIsInstance(exception, StreamingQueryException)
-        self._assert_exception_tree_contains_msg(exception, "ZeroDivisionError")
+            bad_udf = udf(lambda x: 1 / 0)
+            sq = (
+                sdf.select(bad_udf(col("value")))
+                .writeStream.format("memory")
+                .queryName("this_query")
+                .start()
+            )
+            try:
+                # Process some data to fail the query
+                sq.processAllAvailable()
+                self.fail("bad udf should fail the query")
+            except StreamingQueryException as e:
+                # This is expected
+                self._assert_exception_tree_contains_msg(e, "ZeroDivisionError")
+            finally:
+                exception = sq.exception()
+                sq.stop()
+            self.assertIsInstance(exception, StreamingQueryException)
+            self._assert_exception_tree_contains_msg(exception, "ZeroDivisionError")
 
-    def _assert_exception_tree_contains_msg(self, exception, msg):
-        if isinstance(exception, SparkConnectException):
-            self._assert_exception_tree_contains_msg_connect(exception, msg)
-        else:
-            self._assert_exception_tree_contains_msg_default(exception, msg)
-
-    def _assert_exception_tree_contains_msg_connect(self, exception, msg):
-        self.assertTrue(
-            msg in exception._message,
-            "Exception tree doesn't contain the expected message: %s" % msg,
-        )
-
-    def _assert_exception_tree_contains_msg_default(self, exception, msg):
-        e = exception
-        contains = msg in e._desc
-        while e._cause is not None and not contains:
-            e = e._cause
-            contains = msg in e._desc
-        self.assertTrue(contains, "Exception tree doesn't contain the expected message: %s" % msg)
+    def test_query_manager_no_recreation(self):
+        # SPARK-46873: There should not be a new StreamingQueryManager created every time
+        # spark.streams is called.
+        for i in range(5):
+            self.assertTrue(self.spark.streams == self.spark.streams)
 
     def test_query_manager_get(self):
         df = self.spark.readStream.format("rate").load()
@@ -373,7 +359,7 @@ class StreamingTestsMixin:
             )
 
     def test_streaming_write_to_table(self):
-        with self.table("output_table"), tempfile.TemporaryDirectory() as tmpdir:
+        with self.table("output_table"), tempfile.TemporaryDirectory(prefix="to_table") as tmpdir:
             df = self.spark.readStream.format("rate").option("rowsPerSecond", 10).load()
             q = df.writeStream.toTable("output_table", format="parquet", checkpointLocation=tmpdir)
             self.assertTrue(q.isActive)
@@ -408,7 +394,13 @@ class StreamingTestsMixin:
 
 
 class StreamingTests(StreamingTestsMixin, ReusedSQLTestCase):
-    pass
+    def _assert_exception_tree_contains_msg(self, exception, msg):
+        e = exception
+        contains = msg in e._desc
+        while e._cause is not None and not contains:
+            e = e._cause
+            contains = msg in e._desc
+        self.assertTrue(contains, "Exception tree doesn't contain the expected message: %s" % msg)
 
 
 if __name__ == "__main__":

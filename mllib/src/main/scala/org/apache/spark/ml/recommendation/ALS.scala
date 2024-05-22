@@ -33,7 +33,8 @@ import org.json4s.JsonDSL._
 
 import org.apache.spark.{Partitioner, SparkException}
 import org.apache.spark.annotation.Since
-import org.apache.spark.internal.Logging
+import org.apache.spark.internal.{Logging, MDC}
+import org.apache.spark.internal.LogKeys.PATH
 import org.apache.spark.ml.{Estimator, Model}
 import org.apache.spark.ml.linalg.BLAS
 import org.apache.spark.ml.param._
@@ -324,13 +325,22 @@ class ALSModel private[ml] (
     // create a new column named map(predictionCol) by running the predict UDF.
     val validatedUsers = checkIntegers(dataset, $(userCol))
     val validatedItems = checkIntegers(dataset, $(itemCol))
+
+    val validatedInputAlias = Identifiable.randomUID("__als_validated_input")
+    val itemFactorsAlias = Identifiable.randomUID("__als_item_factors")
+    val userFactorsAlias = Identifiable.randomUID("__als_user_factors")
+
     val predictions = dataset
-      .join(userFactors,
-        validatedUsers === userFactors("id"), "left")
-      .join(itemFactors,
-        validatedItems === itemFactors("id"), "left")
-      .select(dataset("*"),
-        predict(userFactors("features"), itemFactors("features")).as($(predictionCol)))
+      .withColumns(Seq($(userCol), $(itemCol)), Seq(validatedUsers, validatedItems))
+      .alias(validatedInputAlias)
+      .join(userFactors.alias(userFactorsAlias),
+        col(s"${validatedInputAlias}.${$(userCol)}") === col(s"${userFactorsAlias}.id"), "left")
+      .join(itemFactors.alias(itemFactorsAlias),
+        col(s"${validatedInputAlias}.${$(itemCol)}") === col(s"${itemFactorsAlias}.id"), "left")
+      .select(col(s"${validatedInputAlias}.*"),
+        predict(col(s"${userFactorsAlias}.features"), col(s"${itemFactorsAlias}.features"))
+          .alias($(predictionCol)))
+
     getColdStartStrategy match {
       case ALSModel.Drop =>
         predictions.na.drop("all", Seq($(predictionCol)))
@@ -1018,7 +1028,7 @@ object ALS extends DefaultParamsReadable[ALS] with Logging {
           checkpointFile.getFileSystem(sc.hadoopConfiguration).delete(checkpointFile, true)
         } catch {
           case e: IOException =>
-            logWarning(s"Cannot delete checkpoint file $file:", e)
+            logWarning(log"Cannot delete checkpoint file ${MDC(PATH, file)}:", e)
         }
       }
 

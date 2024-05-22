@@ -17,10 +17,11 @@
 
 import unittest
 
-from pyspark.errors import PythonException
+from pyspark.errors import AnalysisException, PythonException, PySparkNotImplementedError
 from pyspark.sql import Row
 from pyspark.sql.functions import udf
 from pyspark.sql.tests.test_udf import BaseUDFTestsMixin
+from pyspark.sql.types import VarcharType
 from pyspark.testing.sqlutils import (
     have_pandas,
     have_pyarrow,
@@ -28,7 +29,7 @@ from pyspark.testing.sqlutils import (
     pyarrow_requirement_message,
     ReusedSQLTestCase,
 )
-from pyspark.rdd import PythonEvalType
+from pyspark.util import PythonEvalType
 
 
 @unittest.skipIf(
@@ -174,6 +175,49 @@ class PythonUDFArrowTestsMixin(BaseUDFTestsMixin):
 
         with self.assertRaises(PythonException):
             df_floating_value.select(udf(lambda x: x, "decimal")("value").alias("res")).collect()
+
+    def test_err_return_type(self):
+        with self.assertRaises(PySparkNotImplementedError) as pe:
+            udf(lambda x: x, VarcharType(10), useArrow=True)
+
+        self.check_error(
+            exception=pe.exception,
+            error_class="NOT_IMPLEMENTED",
+            message_parameters={
+                "feature": "Invalid return type with Arrow-optimized Python UDF: VarcharType(10)"
+            },
+        )
+
+    def test_warn_no_args(self):
+        with self.assertWarns(UserWarning) as w:
+            udf(lambda: print("do"), useArrow=True)
+        self.assertEqual(
+            str(w.warning),
+            "Arrow optimization for Python UDFs cannot be enabled for functions"
+            " without arguments.",
+        )
+
+    def test_named_arguments_negative(self):
+        @udf("int")
+        def test_udf(a, b):
+            return a + b
+
+        self.spark.udf.register("test_udf", test_udf)
+
+        with self.assertRaisesRegex(
+            AnalysisException,
+            "DUPLICATE_ROUTINE_PARAMETER_ASSIGNMENT.DOUBLE_NAMED_ARGUMENT_REFERENCE",
+        ):
+            self.spark.sql("SELECT test_udf(a => id, a => id * 10) FROM range(2)").show()
+
+        with self.assertRaisesRegex(AnalysisException, "UNEXPECTED_POSITIONAL_ARGUMENT"):
+            self.spark.sql("SELECT test_udf(a => id, id * 10) FROM range(2)").show()
+
+        with self.assertRaises(PythonException):
+            self.spark.sql("SELECT test_udf(c => 'x') FROM range(2)").show()
+
+        with self.assertRaises(PythonException):
+            self.spark.sql("SELECT test_udf(id, a => id * 10) FROM range(2)").show()
 
 
 class PythonUDFArrowTests(PythonUDFArrowTestsMixin, ReusedSQLTestCase):

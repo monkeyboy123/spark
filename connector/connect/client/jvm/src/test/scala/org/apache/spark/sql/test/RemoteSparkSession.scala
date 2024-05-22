@@ -23,7 +23,7 @@ import java.util.concurrent.TimeUnit
 
 import scala.concurrent.duration.FiniteDuration
 
-import org.scalatest.BeforeAndAfterAll
+import org.scalatest.{BeforeAndAfterAll, Suite}
 
 import org.apache.spark.SparkBuildInfo
 import org.apache.spark.sql.SparkSession
@@ -145,7 +145,7 @@ object SparkConnectServerUtils {
       consoleOut.flush()
       consoleOut.close()
       if (!sparkConnect.waitFor(2, TimeUnit.SECONDS)) {
-        sparkConnect.destroyForcibly()
+        sparkConnect.destroyForcibly().waitFor(2, TimeUnit.SECONDS)
       }
       val code = sparkConnect.exitValue()
       debug(s"Spark Connect Server is stopped with exit code: $code")
@@ -204,7 +204,7 @@ object SparkConnectServerUtils {
   }
 }
 
-trait RemoteSparkSession extends ConnectFunSuite with BeforeAndAfterAll {
+trait RemoteSparkSession extends BeforeAndAfterAll { self: Suite =>
   import SparkConnectServerUtils._
   var spark: SparkSession = _
   protected lazy val serverPort: Int = port

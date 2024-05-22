@@ -20,6 +20,8 @@ package org.apache.spark.sql.catalyst.analysis
 import org.apache.commons.lang3.StringUtils
 
 import org.apache.spark.SparkException
+import org.apache.spark.internal.LogKeys.CONFIG
+import org.apache.spark.internal.MDC
 import org.apache.spark.sql.SaveMode
 import org.apache.spark.sql.catalyst.{FunctionIdentifier, TableIdentifier}
 import org.apache.spark.sql.catalyst.catalog.{CatalogStorageFormat, CatalogTable, CatalogTableType, CatalogUtils, ClusterBySpec}
@@ -160,7 +162,8 @@ class ResolveSessionCatalog(val catalogManager: CatalogManager)
 
     // For CREATE TABLE [AS SELECT], we should use the v1 command if the catalog is resolved to the
     // session catalog and the table provider is not v2.
-    case c @ CreateTable(ResolvedV1Identifier(ident), _, _, tableSpec: TableSpec, _) =>
+    case c @ CreateTable(ResolvedV1Identifier(ident), _, _, tableSpec: TableSpec, _)
+        if c.resolved =>
       val (storageFormat, provider) = getStorageFormatAndProvider(
         c.tableSpec.provider, tableSpec.options, c.tableSpec.location, c.tableSpec.serde,
         ctas = false)
@@ -192,7 +195,7 @@ class ResolveSessionCatalog(val catalogManager: CatalogManager)
 
     // For REPLACE TABLE [AS SELECT], we should fail if the catalog is resolved to the
     // session catalog and the table provider is not v2.
-    case c @ ReplaceTable(ResolvedV1Identifier(ident), _, _, _, _) =>
+    case c @ ReplaceTable(ResolvedV1Identifier(ident), _, _, _, _) if c.resolved =>
       val provider = c.tableSpec.provider.getOrElse(conf.defaultDataSourceName)
       if (!isV2Provider(provider)) {
         throw QueryCompilationErrors.unsupportedTableOperationError(
@@ -378,8 +381,11 @@ class ResolveSessionCatalog(val catalogManager: CatalogManager)
     case AlterViewAs(ResolvedViewIdentifier(ident), originalText, query) =>
       AlterViewAsCommand(ident, originalText, query)
 
+    case AlterViewSchemaBinding(ResolvedViewIdentifier(ident), viewSchemaMode) =>
+      AlterViewSchemaBindingCommand(ident, viewSchemaMode)
+
     case CreateView(ResolvedV1Identifier(ident), userSpecifiedColumns, comment,
-        properties, originalText, child, allowExisting, replace) =>
+        properties, originalText, child, allowExisting, replace, viewSchemaMode) =>
       CreateViewCommand(
         name = ident,
         userSpecifiedColumns = userSpecifiedColumns,
@@ -389,9 +395,10 @@ class ResolveSessionCatalog(val catalogManager: CatalogManager)
         plan = child,
         allowExisting = allowExisting,
         replace = replace,
-        viewType = PersistedView)
+        viewType = PersistedView,
+        viewSchemaMode = viewSchemaMode)
 
-    case CreateView(ResolvedIdentifier(catalog, _), _, _, _, _, _, _, _) =>
+    case CreateView(ResolvedIdentifier(catalog, _), _, _, _, _, _, _, _, _) =>
       throw QueryCompilationErrors.missingCatalogAbilityError(catalog, "views")
 
     case ShowViews(ns: ResolvedNamespace, pattern, output) =>
@@ -523,9 +530,10 @@ class ResolveSessionCatalog(val catalogManager: CatalogManager)
       if (!createHiveTableByDefault || (ctas && conf.convertCTAS)) {
         (nonHiveStorageFormat, conf.defaultDataSourceName)
       } else {
-        logWarning("A Hive serde table will be created as there is no table provider " +
-          s"specified. You can set ${SQLConf.LEGACY_CREATE_HIVE_TABLE_BY_DEFAULT.key} to false " +
-          "so that native data source table will be created instead.")
+        logWarning(log"A Hive serde table will be created as there is no table provider " +
+          log"specified. You can set " +
+          log"${MDC(CONFIG, SQLConf.LEGACY_CREATE_HIVE_TABLE_BY_DEFAULT.key)} to false so that " +
+          log"native data source table will be created instead.")
         (defaultHiveStorage, DDLUtils.HIVE_PROVIDER)
       }
     }

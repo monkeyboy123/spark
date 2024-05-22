@@ -23,6 +23,7 @@ import org.apache.spark.{QueryContext, SparkException}
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.analysis.{FunctionRegistry, TypeCheckResult, TypeCoercion}
 import org.apache.spark.sql.catalyst.analysis.TypeCheckResult.DataTypeMismatch
+import org.apache.spark.sql.catalyst.expressions.Cast.{toSQLExpr, toSQLType}
 import org.apache.spark.sql.catalyst.expressions.aggregate.AggregateFunction
 import org.apache.spark.sql.catalyst.expressions.codegen._
 import org.apache.spark.sql.catalyst.expressions.codegen.Block._
@@ -139,6 +140,11 @@ abstract class Expression extends TreeNode[Expression] {
    * }}}
    */
   def stateful: Boolean = false
+
+  /**
+   * Returns true if the expression could potentially throw an exception when evaluated.
+   */
+  lazy val throwable: Boolean = children.exists(_.throwable)
 
   /**
    * Returns a copy of this expression where all stateful expressions are replaced with fresh
@@ -305,7 +311,7 @@ abstract class Expression extends TreeNode[Expression] {
    * Returns true when two expressions will always compute the same result, even if they differ
    * cosmetically (i.e. capitalization of names in attributes may be different).
    *
-   * See [[Canonicalize]] for more details.
+   * See [[Expression#canonicalized]] for more details.
    */
   final def semanticEquals(other: Expression): Boolean =
     deterministic && other.deterministic && canonicalized == other.canonicalized
@@ -314,7 +320,7 @@ abstract class Expression extends TreeNode[Expression] {
    * Returns a `hashCode` for the calculation performed by this expression. Unlike the standard
    * `hashCode`, an attempt has been made to eliminate cosmetic differences.
    *
-   * See [[Canonicalize]] for more details.
+   * See [[Expression#canonicalized]] for more details.
    */
   def semanticHash(): Int = canonicalized.hashCode()
 
@@ -370,16 +376,12 @@ abstract class Expression extends TreeNode[Expression] {
     }
 }
 
-
 /**
- * An expression that cannot be evaluated. These expressions don't live past analysis or
- * optimization time (e.g. Star) and should not be evaluated during query planning and
- * execution.
+ * An expression that cannot be evaluated but is guaranteed to be replaced with a foldable value
+ * by query optimizer (e.g. CurrentDate).
  */
-trait Unevaluable extends Expression {
-
-  /** Unevaluable is not foldable because we don't have an eval for it. */
-  final override def foldable: Boolean = false
+trait FoldableUnevaluable extends Expression {
+  override def foldable: Boolean = true
 
   final override def eval(input: InternalRow = null): Any =
     throw QueryExecutionErrors.cannotEvaluateExpressionError(this)
@@ -388,6 +390,19 @@ trait Unevaluable extends Expression {
     throw QueryExecutionErrors.cannotGenerateCodeForExpressionError(this)
 }
 
+/**
+ * An expression that cannot be evaluated. These expressions don't live past analysis or
+ * optimization time (e.g. Star) and should not be evaluated during query planning and
+ * execution.
+ */
+trait Unevaluable extends Expression with FoldableUnevaluable {
+
+  /** Unevaluable is not foldable by default because we don't have an eval for it.
+   * Exception are expressions that will be replaced by a literal by Optimizer (e.g. CurrentDate).
+   * Hence we allow overriding overriding of this field in special cases.
+   */
+  final override def foldable: Boolean = false
+}
 
 /**
  * An expression that gets replaced at runtime (currently by the optimizer) into a different
@@ -559,7 +574,7 @@ abstract class UnaryExpression extends Expression with UnaryLike[Expression] {
    * of evaluation process, we should override [[eval]].
    */
   protected def nullSafeEval(input: Any): Any =
-    throw QueryExecutionErrors.notOverrideExpectedMethodsError("UnaryExpressions",
+    throw QueryExecutionErrors.notOverrideExpectedMethodsError(this.getClass.getName,
       "eval", "nullSafeEval")
 
   /**
@@ -685,7 +700,7 @@ abstract class BinaryExpression extends Expression with BinaryLike[Expression] {
    * of evaluation process, we should override [[eval]].
    */
   protected def nullSafeEval(input1: Any, input2: Any): Any =
-    throw QueryExecutionErrors.notOverrideExpectedMethodsError("BinaryExpressions",
+    throw QueryExecutionErrors.notOverrideExpectedMethodsError(this.getClass.getName,
       "eval", "nullSafeEval")
 
   /**
@@ -836,7 +851,7 @@ abstract class TernaryExpression extends Expression with TernaryLike[Expression]
    * of evaluation process, we should override [[eval]].
    */
   protected def nullSafeEval(input1: Any, input2: Any, input3: Any): Any =
-    throw QueryExecutionErrors.notOverrideExpectedMethodsError("TernaryExpressions",
+    throw QueryExecutionErrors.notOverrideExpectedMethodsError(this.getClass.getName,
       "eval", "nullSafeEval")
 
   /**
@@ -937,7 +952,7 @@ abstract class QuaternaryExpression extends Expression with QuaternaryLike[Expre
    *  full control of evaluation process, we should override [[eval]].
    */
   protected def nullSafeEval(input1: Any, input2: Any, input3: Any, input4: Any): Any =
-    throw QueryExecutionErrors.notOverrideExpectedMethodsError("QuaternaryExpressions",
+    throw QueryExecutionErrors.notOverrideExpectedMethodsError(this.getClass.getName,
       "eval", "nullSafeEval")
 
   /**
@@ -1052,7 +1067,7 @@ abstract class QuinaryExpression extends Expression {
       input4: Any,
       input5: Any): Any = {
     throw QueryExecutionErrors.notOverrideExpectedMethodsError(
-      "QuinaryExpression",
+      this.getClass.getName,
       "eval",
       "nullSafeEval")
   }
@@ -1190,7 +1205,7 @@ abstract class SeptenaryExpression extends Expression {
       input5: Any,
       input6: Any,
       input7: Option[Any]): Any = {
-    throw QueryExecutionErrors.notOverrideExpectedMethodsError("SeptenaryExpression",
+    throw QueryExecutionErrors.notOverrideExpectedMethodsError(this.getClass.getName,
       "eval", "nullSafeEval")
   }
 
@@ -1300,14 +1315,16 @@ trait ComplexTypeMergingExpression extends Expression {
   lazy val inputTypesForMerging: Seq[DataType] = children.map(_.dataType)
 
   def dataTypeCheck: Unit = {
-    require(
-      inputTypesForMerging.nonEmpty,
-      "The collection of input data types must not be empty.")
-    require(
-      TypeCoercion.haveSameType(inputTypesForMerging),
-      "All input types must be the same except nullable, containsNull, valueContainsNull flags. " +
-        s"The expression is: $this. " +
-        s"The input types found are\n\t${inputTypesForMerging.mkString("\n\t")}.")
+    SparkException.require(
+      requirement = inputTypesForMerging.nonEmpty,
+      errorClass = "COMPLEX_EXPRESSION_UNSUPPORTED_INPUT.NO_INPUTS",
+      messageParameters = Map("expression" -> toSQLExpr(this)))
+    SparkException.require(
+      requirement = TypeCoercion.haveSameType(inputTypesForMerging),
+      errorClass = "COMPLEX_EXPRESSION_UNSUPPORTED_INPUT.MISMATCHED_TYPES",
+      messageParameters = Map(
+        "expression" -> toSQLExpr(this),
+        "inputTypes" -> inputTypesForMerging.map(toSQLType).mkString("[", ", ", "]")))
   }
 
   private lazy val internalDataType: DataType = {
